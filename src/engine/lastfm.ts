@@ -3,6 +3,7 @@ import type { ArtistGraph, ArtistInfo, SimilarArtist } from "./discover.ts";
 const API = "https://ws.audioscrobbler.com/2.0/";
 const MIN_GAP_MS = 220;
 const CACHE_DAYS = 30;
+const REQUEST_TIMEOUT_MS = 15_000;
 const IGNORED_TAGS = new Set(["seen live", "favorites", "favourite", "albums i own", "under 2000 listeners"]);
 
 export interface Cache {
@@ -37,7 +38,7 @@ export class LastFm implements ArtistGraph {
       autocorrect: "1",
     });
     if (limit) params.set("limit", String(limit));
-    const res = await fetch(`${API}?${params}`);
+    const res = await fetch(`${API}?${params}`, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
     const body = await res.json();
     // Error 6 means Last.fm doesn't know this artist, which is a normal result.
     if (body.error && body.error !== 6) throw new Error(`Last.fm: ${body.message}`);

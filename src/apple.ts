@@ -5,8 +5,19 @@ import type { CatalogSong } from "./engine/discover.ts";
 const POLL_MS = 2000;
 const DEFAULT_STOREFRONT = "us";
 
-const request = (path: string, params?: any, opts?: any): Promise<any> =>
-  v3<any>(path, params, opts);
+const REQUEST_TIMEOUT_MS = 10_000;
+
+/** Cider's helper can hang without rejecting, so every call gets a deadline. */
+function request(path: string, params: any = {}, opts?: any): Promise<any> {
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`No response in ${REQUEST_TIMEOUT_MS / 1000}s from ${path.split("?")[0]}`)),
+      REQUEST_TIMEOUT_MS,
+    );
+  });
+  return Promise.race([v3<any>(path, params, opts), timeout]).finally(() => clearTimeout(timer));
+}
 
 let storefront: Promise<string> | null = null;
 function getStorefront(): Promise<string> {
