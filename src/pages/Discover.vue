@@ -1,40 +1,38 @@
 <script setup lang="ts">
-import { onMounted, ref, shallowRef } from "vue";
-import { discover } from "../engine/discover.ts";
+import { computed, onMounted, ref } from "vue";
 import type { Pick } from "../engine/discover.ts";
-import { importPlayActivity, normalizeArtist, songKey } from "../engine/history.ts";
-import { LastFm } from "../engine/lastfm.ts";
+import { importPlayActivity, normalizeArtist } from "../engine/history.ts";
 import { DEFAULT_LEVERS, learnFromReaction } from "../engine/score.ts";
 import type { Levers } from "../engine/score.ts";
-import { favoriteSong, findSong, playSongs, readLibraryAndRecent, searchNotice, searchStats, watchPlayback } from "../apple.ts";
-import { lastFmCache, load, save } from "../store.ts";
-import type { Saved } from "../store.ts";
+import { favoriteSong, playSongs, readLibraryAndRecent, removeFromQueue } from "../apple.ts";
+import {
+  artistCount,
+  ensureLoaded,
+  error,
+  heardCount,
+  markHeard,
+  persist,
+  picks,
+  saved,
+  searching,
+  startDiscovery,
+  status,
+  stopDiscovery,
+} from "../session.ts";
 
-const SKIP_SECONDS = 30;
-
-const saved = shallowRef<Saved | null>(null);
 const apiKey = ref("");
 const levers = ref<Levers>({ ...DEFAULT_LEVERS });
 const focusTags = ref("");
 const avoidTags = ref("");
 const focusArtists = ref("");
-const picks = ref<Pick[]>([]);
 const favorited = ref(new Set<string>());
-const status = ref("");
-const error = ref("");
+const taskStatus = ref("");
 const busy = ref(false);
-const heardCount = ref(0);
-const artistCount = ref(0);
 
+const shownStatus = computed(() => taskStatus.value || status.value);
 const splitList = (s: string) => s.split(",").map((x) => x.trim()).filter(Boolean);
 
-function refreshCounts() {
-  if (!saved.value) return;
-  heardCount.value = saved.value.taste.heardSongs.size;
-  artistCount.value = Object.keys(saved.value.taste.artistPlays).length;
-}
-
-async function persist() {
+async function saveSettings() {
   if (!saved.value) return;
   saved.value.apiKey = apiKey.value.trim();
   saved.value.levers = {
@@ -43,32 +41,28 @@ async function persist() {
     avoidTags: splitList(avoidTags.value),
     focusArtists: splitList(focusArtists.value),
   };
-  await save(saved.value);
-  refreshCounts();
-}
-
-function markHeard(artist: string, title: string, isrc?: string) {
-  const taste = saved.value!.taste;
-  taste.heardSongs.add(songKey(artist, title));
-  if (isrc) taste.heardIsrcs.add(isrc);
+  await persist();
 }
 
 async function guarded(task: () => Promise<void>) {
-  busy.value = true;
   error.value = "";
   try {
     await task();
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e);
-  } finally {
-    busy.value = false;
-    status.value = "";
   }
 }
 
+async function withBusy(message: string, task: () => Promise<void>) {
+  busy.value = true;
+  taskStatus.value = message;
+  await guarded(task);
+  busy.value = false;
+  taskStatus.value = "";
+}
+
 const syncLibrary = () =>
-  guarded(async () => {
-    status.value = "Reading your Apple Music library";
+  withBusy("Reading your Apple Music library", async () => {
     const { songs } = await readLibraryAndRecent();
     const taste = saved.value!.taste;
     const seen = new Set<string>();
@@ -90,10 +84,9 @@ const syncLibrary = () =>
   });
 
 const importCsv = (event: Event) =>
-  guarded(async () => {
+  withBusy("Importing play history", async () => {
     const file = (event.target as HTMLInputElement).files?.[0];
     if (!file) return;
-    status.value = "Importing play history";
     const result = importPlayActivity(await file.text());
     const taste = saved.value!.taste;
     result.songKeys.forEach((k) => taste.heardSongs.add(k));
@@ -104,40 +97,12 @@ const importCsv = (event: Event) =>
     await persist();
   });
 
-const findMusic = () =>
-  guarded(async () => {
-    if (!apiKey.value.trim()) throw new Error("Add a Last.fm API key first.");
-    await persist();
-    const graph = new LastFm(apiKey.value.trim(), lastFmCache);
-    picks.value = [];
-    searchNotice.onChange = (m) => {
-      status.value = m;
-    };
-    searchStats.searches = 0;
-    searchStats.withResults = 0;
-    await discover(
-      graph,
-      findSong,
-      saved.value!.taste,
-      saved.value!.levers,
-      (m) => {
-        status.value = m;
-      },
-      (pick) => {
-        picks.value.push(pick);
-        saved.value!.artistTags[pick.artistKey] = pick.tags;
-      },
-    );
-    await persist();
-    if (!picks.value.length) {
-      error.value =
-        `Nothing matched. Apple Music searches: ${searchStats.searches}, ` +
-        `with results: ${searchStats.withResults}. Try loosening the levers.`;
-    }
-  });
+async function findMusic() {
+  await saveSettings();
+  startDiscovery();
+}
 
-const play = (index: number) =>
-  guarded(() => playSongs(picks.value.map((p) => p.id), index));
+const play = (index: number) => guarded(() => playSongs(picks.value.map((p) => p.id), index));
 
 const favorite = (pick: Pick) =>
   guarded(async () => {
@@ -155,29 +120,21 @@ async function reject(pick: Pick) {
   taste.blockedArtists.push(pick.artistKey);
   learnFromReaction(taste.tagWeights, pick.tags, "reject");
   markHeard(pick.artist, pick.title, pick.isrc);
+  picks.value
+    .filter((p) => p.artistKey === pick.artistKey)
+    .forEach((p) => removeFromQueue(p.id));
   picks.value = picks.value.filter((p) => p.artistKey !== pick.artistKey);
   await persist();
 }
 
 onMounted(async () => {
-  saved.value = await load();
-  apiKey.value = saved.value.apiKey;
-  levers.value = saved.value.levers;
-  focusTags.value = saved.value.levers.focusTags.join(", ");
-  avoidTags.value = saved.value.levers.avoidTags.join(", ");
-  focusArtists.value = saved.value.levers.focusArtists.join(", ");
-  refreshCounts();
-
-  // Records everything Cider plays, including music started outside this page.
-  watchPlayback((track, previous, listened) => {
-    const s = saved.value!;
-    markHeard(track.artist, track.title, track.isrc);
-    if (previous && listened < SKIP_SECONDS) {
-      const tags = s.artistTags[normalizeArtist(previous.artist)];
-      if (tags) learnFromReaction(s.taste.tagWeights, tags, "skip");
-    }
-    persist();
-  });
+  await ensureLoaded();
+  const s = saved.value!;
+  apiKey.value = s.apiKey;
+  levers.value = s.levers;
+  focusTags.value = s.levers.focusTags.join(", ");
+  avoidTags.value = s.levers.avoidTags.join(", ");
+  focusArtists.value = s.levers.focusArtists.join(", ");
 });
 </script>
 
@@ -187,7 +144,7 @@ onMounted(async () => {
     <p class="dc-muted">{{ heardCount }} songs heard · {{ artistCount }} artists known</p>
 
     <section class="dc-row">
-      <label>Last.fm API key <input v-model="apiKey" type="password" @change="persist" /></label>
+      <label>Last.fm API key <input v-model="apiKey" type="password" @change="saveSettings" /></label>
       <button class="c-btn" :disabled="busy" @click="syncLibrary">Sync library</button>
       <label class="c-btn">Import play history CSV
         <input type="file" accept=".csv" hidden @change="importCsv" />
@@ -230,8 +187,12 @@ onMounted(async () => {
       </label>
     </section>
 
-    <button class="c-btn dc-go" :disabled="busy" @click="findMusic">Find new music</button>
-    <p v-if="status" class="dc-muted">{{ status }}…</p>
+    <button v-if="!searching" class="c-btn dc-go" @click="findMusic">Find new music</button>
+    <button v-else class="c-btn dc-go" @click="stopDiscovery">Stop finding</button>
+    <p v-if="shownStatus" class="dc-muted">{{ shownStatus }}…</p>
+    <p v-if="searching && picks.length" class="dc-muted">
+      You can start listening now. New songs join the queue as they're found.
+    </p>
     <p v-if="error" class="dc-error">{{ error }}</p>
 
     <ol class="dc-list">

@@ -4,6 +4,7 @@ import type { CatalogSong } from "./engine/discover.ts";
 import { lastFmCache } from "./store.ts";
 
 const POLL_MS = 2000;
+const ADVANCE_GUARD_MS = 6000;
 // Matches the storefront PluginKit's playItemById always uses.
 const STOREFRONT = "us";
 const LIBRARY_PAGE_GAP_MS = 1000;
@@ -59,12 +60,16 @@ export async function readLibraryAndRecent(): Promise<AppleHistory> {
 
 export const searchStats = { searches: 0, withResults: 0 };
 
-const SEARCH_GAP_MS = 3500;
+const SEARCH_GAP_MS = 6000;
+const SEARCH_GAP_MAX_MS = 30_000;
+const GAP_RECOVERY = 0.97;
+const SEARCH_ATTEMPTS = 4;
 const BACKOFF_START_MS = 20_000;
 const BACKOFF_MAX_MS = 120_000;
 const SEARCH_CACHE_DAYS = 30;
 
 let nextSearchAt = 0;
+let searchGapMs = SEARCH_GAP_MS;
 let backoffMs = BACKOFF_START_MS;
 
 /** Set by the page to show when searching is paused for Apple's rate limit. */
@@ -78,19 +83,24 @@ export async function findSong(artist: string, title: string): Promise<CatalogSo
     return hit.value as CatalogSong | null;
   }
 
-  const wait = nextSearchAt - Date.now();
-  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
-  nextSearchAt = Date.now() + SEARCH_GAP_MS;
-  try {
-    const song = await searchCatalog(artist, title);
-    backoffMs = BACKOFF_START_MS;
-    await lastFmCache.set(cacheKey, { at: Date.now(), value: song });
-    return song;
-  } catch (e) {
-    nextSearchAt = Date.now() + backoffMs;
-    searchNotice.onChange(`Apple Music is limiting requests. Waiting ${backoffMs / 1000}s`);
-    backoffMs = Math.min(backoffMs * 2, BACKOFF_MAX_MS);
-    throw e;
+  for (let attempt = 1; ; attempt++) {
+    const wait = nextSearchAt - Date.now();
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+    nextSearchAt = Date.now() + searchGapMs;
+    try {
+      const song = await searchCatalog(artist, title);
+      backoffMs = BACKOFF_START_MS;
+      searchGapMs = Math.max(SEARCH_GAP_MS, searchGapMs * GAP_RECOVERY);
+      await lastFmCache.set(cacheKey, { at: Date.now(), value: song });
+      return song;
+    } catch (e) {
+      // Each limit hit also slows normal pacing, settling near what Apple tolerates.
+      searchGapMs = Math.min(SEARCH_GAP_MAX_MS, searchGapMs * 1.5);
+      nextSearchAt = Date.now() + backoffMs;
+      searchNotice.onChange(`Apple Music is limiting requests. Retrying in ${backoffMs / 1000}s`);
+      backoffMs = Math.min(backoffMs * 2, BACKOFF_MAX_MS);
+      if (attempt >= SEARCH_ATTEMPTS) throw e;
+    }
   }
 }
 
@@ -145,6 +155,20 @@ export async function playSongs(ids: string[], startAt = 0): Promise<void> {
   await playCurrent();
 }
 
+export function appendToQueue(id: string): void {
+  if (queueIndex >= 0) queue.push(id);
+}
+
+export function removeFromQueue(id: string): void {
+  const at = queue.indexOf(id);
+  if (at > queueIndex) queue.splice(at, 1);
+}
+
+/** How many songs are left after the current one, or null when no queue was started. */
+export function queueRemaining(): number | null {
+  return queueIndex < 0 ? null : queue.length - queueIndex - 1;
+}
+
 /** Marks the song as loved on Apple Music and adds it to the library. */
 export async function favoriteSong(id: string): Promise<void> {
   await request(`/v1/me/ratings/songs/${id}`, undefined, {
@@ -166,7 +190,13 @@ export interface NowPlaying {
 }
 
 function readNowPlaying(): NowPlaying | null {
-  const item = AppleMusic.nowPlayingItem as any;
+  // The host store may not exist yet when the plugin starts.
+  let item: any;
+  try {
+    item = AppleMusic.nowPlayingItem;
+  } catch {
+    return null;
+  }
   const attrs = item?.attributes ?? item;
   const id = item?.id ?? attrs?.playParams?.id;
   if (!id || !attrs?.artistName || !attrs?.name) return null;
@@ -186,7 +216,7 @@ export function watchPlayback(
 ): void {
   let previous: NowPlaying | null = null;
   let startedAt = Date.now();
-  let wasEnded = false;
+  let lastAdvance = 0;
   setInterval(() => {
     const track = readNowPlaying();
     if (track && previous?.id !== track.id) {
@@ -194,11 +224,16 @@ export function watchPlayback(
       previous = track;
       startedAt = Date.now();
     }
-    const ended = audioEnded();
-    if (ended && !wasEnded && track?.id === queue[queueIndex] && queueIndex + 1 < queue.length) {
+    // No edge detection: a song that ended before the next pick was found resumes here.
+    if (
+      audioEnded() &&
+      track?.id === queue[queueIndex] &&
+      queueIndex + 1 < queue.length &&
+      Date.now() - lastAdvance > ADVANCE_GUARD_MS
+    ) {
+      lastAdvance = Date.now();
       queueIndex++;
       playCurrent();
     }
-    wasEnded = ended;
   }, POLL_MS);
 }
