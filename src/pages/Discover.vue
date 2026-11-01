@@ -6,7 +6,7 @@ import { importPlayActivity, normalizeArtist, songKey } from "../engine/history.
 import { LastFm } from "../engine/lastfm.ts";
 import { DEFAULT_LEVERS, learnFromReaction } from "../engine/score.ts";
 import type { Levers } from "../engine/score.ts";
-import { favoriteSong, findSong, playSongs, readLibraryAndRecent, searchStats, watchPlayback } from "../apple.ts";
+import { favoriteSong, findSong, playSongs, readLibraryAndRecent, searchNotice, searchStats, watchPlayback } from "../apple.ts";
 import { lastFmCache, load, save } from "../store.ts";
 import type { Saved } from "../store.ts";
 
@@ -110,6 +110,9 @@ const findMusic = () =>
     await persist();
     const graph = new LastFm(apiKey.value.trim(), lastFmCache);
     picks.value = [];
+    searchNotice.onChange = (m) => {
+      status.value = m;
+    };
     searchStats.searches = 0;
     searchStats.withResults = 0;
     await discover(

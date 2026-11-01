@@ -1,6 +1,7 @@
 import { AppleMusic, v3 } from "@ciderapp/pluginkit";
 import { normalizeArtist, normalizeTitle } from "./engine/history.ts";
 import type { CatalogSong } from "./engine/discover.ts";
+import { lastFmCache } from "./store.ts";
 
 const POLL_MS = 2000;
 const DEFAULT_STOREFRONT = "us";
@@ -62,7 +63,42 @@ export async function readLibraryAndRecent(): Promise<AppleHistory> {
 
 export const searchStats = { searches: 0, withResults: 0 };
 
+const SEARCH_GAP_MS = 1500;
+const BACKOFF_START_MS = 20_000;
+const BACKOFF_MAX_MS = 120_000;
+const SEARCH_CACHE_DAYS = 30;
+
+let nextSearchAt = 0;
+let backoffMs = BACKOFF_START_MS;
+
+/** Set by the page to show when searching is paused for Apple's rate limit. */
+export const searchNotice = { onChange: (_message: string) => {} };
+
+/** Paces searches so Apple doesn't answer 429, and backs off when it does anyway. */
 export async function findSong(artist: string, title: string): Promise<CatalogSong | null> {
+  const cacheKey = `apple-search:${artist.toLowerCase()}|${title.toLowerCase()}`;
+  const hit = await lastFmCache.get(cacheKey);
+  if (hit && Date.now() - hit.at < SEARCH_CACHE_DAYS * 86_400_000) {
+    return hit.value as CatalogSong | null;
+  }
+
+  const wait = nextSearchAt - Date.now();
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+  nextSearchAt = Date.now() + SEARCH_GAP_MS;
+  try {
+    const song = await searchCatalog(artist, title);
+    backoffMs = BACKOFF_START_MS;
+    await lastFmCache.set(cacheKey, { at: Date.now(), value: song });
+    return song;
+  } catch (e) {
+    nextSearchAt = Date.now() + backoffMs;
+    searchNotice.onChange(`Apple Music is limiting requests. Waiting ${backoffMs / 1000}s`);
+    backoffMs = Math.min(backoffMs * 2, BACKOFF_MAX_MS);
+    throw e;
+  }
+}
+
+async function searchCatalog(artist: string, title: string): Promise<CatalogSong | null> {
   // Params go in the URL so they don't depend on how Cider's helper reads its arguments.
   const query = new URLSearchParams({ term: `${artist} ${title}`, types: "songs", limit: "10" });
   const res = await request(`/v1/catalog/${await getStorefront()}/search?${query}`);
