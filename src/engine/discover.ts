@@ -56,7 +56,8 @@ const MAX_SEEDS = 40;
 const SIMILAR_PER_ARTIST = 30;
 const EXPAND_PER_HOP = 25;
 const INFO_LOOKUPS = 150;
-const TOP_TRACKS_SEARCHED = 12;
+const TOP_TRACKS_SEARCHED = 4;
+const MAX_SEARCH_FAILURES = 5;
 
 function chooseSeeds(state: TasteState, levers: Levers) {
   if (levers.focusArtists.length) {
@@ -81,6 +82,7 @@ export async function discover(
   state: TasteState,
   levers: Levers,
   onProgress: (message: string) => void = () => {},
+  onPick: (pick: Pick) => void = () => {},
 ): Promise<Pick[]> {
   const known = new Set([
     ...Object.keys(state.artistPlays),
@@ -134,27 +136,43 @@ export async function discover(
     new Set(state.blockedArtists),
   );
 
-  onProgress("Finding unheard songs on Apple Music");
   const picks: Pick[] = [];
-  for (const artist of ranked) {
+  let failures = 0;
+  for (const [index, artist] of ranked.entries()) {
     if (picks.length >= levers.batchSize) break;
+    onProgress(
+      `Finding unheard songs on Apple Music: artist ${index + 1} of ${ranked.length}, ${picks.length} found`,
+    );
     let taken = 0;
     for (const title of await graph.topTracks(artist.name).then((t) => t.slice(0, TOP_TRACKS_SEARCHED))) {
       if (taken >= levers.tracksPerArtist) break;
       if (state.heardSongs.has(songKey(artist.name, title))) continue;
-      const song = await findSong(artist.name, title);
+      let song: CatalogSong | null;
+      try {
+        song = await findSong(artist.name, title);
+        failures = 0;
+      } catch (e) {
+        if (++failures >= MAX_SEARCH_FAILURES) {
+          const reason = e instanceof Error ? e.message : String(e);
+          if (picks.length) return picks;
+          throw new Error(`Apple Music search keeps failing: ${reason}`);
+        }
+        continue;
+      }
       if (!song) continue;
       if (state.heardSongs.has(songKey(song.artist, song.title))) continue;
       if (song.isrc && state.heardIsrcs.has(song.isrc)) continue;
       if (levers.yearFrom && song.year < levers.yearFrom) continue;
       if (levers.yearTo && song.year > levers.yearTo) continue;
-      picks.push({
+      const pick: Pick = {
         ...song,
         artistKey: artist.key,
         listeners: artist.listeners,
         tags: artist.tags,
         why: `Related to ${found.get(artist.key)?.via ?? "your listening"}`,
-      });
+      };
+      picks.push(pick);
+      onPick(pick);
       taken++;
     }
   }

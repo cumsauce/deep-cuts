@@ -6,7 +6,7 @@ import { importPlayActivity, normalizeArtist, songKey } from "../engine/history.
 import { LastFm } from "../engine/lastfm.ts";
 import { DEFAULT_LEVERS, learnFromReaction } from "../engine/score.ts";
 import type { Levers } from "../engine/score.ts";
-import { favoriteSong, findSong, playSongs, readLibraryAndRecent, watchPlayback } from "../apple.ts";
+import { favoriteSong, findSong, playSongs, readLibraryAndRecent, searchStats, watchPlayback } from "../apple.ts";
 import { lastFmCache, load, save } from "../store.ts";
 import type { Saved } from "../store.ts";
 
@@ -109,12 +109,28 @@ const findMusic = () =>
     if (!apiKey.value.trim()) throw new Error("Add a Last.fm API key first.");
     await persist();
     const graph = new LastFm(apiKey.value.trim(), lastFmCache);
-    picks.value = await discover(graph, findSong, saved.value!.taste, saved.value!.levers, (m) => {
-      status.value = m;
-    });
-    for (const p of picks.value) saved.value!.artistTags[p.artistKey] = p.tags;
+    picks.value = [];
+    searchStats.searches = 0;
+    searchStats.withResults = 0;
+    await discover(
+      graph,
+      findSong,
+      saved.value!.taste,
+      saved.value!.levers,
+      (m) => {
+        status.value = m;
+      },
+      (pick) => {
+        picks.value.push(pick);
+        saved.value!.artistTags[pick.artistKey] = pick.tags;
+      },
+    );
     await persist();
-    if (!picks.value.length) error.value = "Nothing matched. Try loosening the levers.";
+    if (!picks.value.length) {
+      error.value =
+        `Nothing matched. Apple Music searches: ${searchStats.searches}, ` +
+        `with results: ${searchStats.withResults}. Try loosening the levers.`;
+    }
   });
 
 const play = (index: number) =>

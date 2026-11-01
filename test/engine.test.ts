@@ -84,6 +84,26 @@ test("tag filters and learned weights apply", () => {
   assert.deepEqual(rankCandidates(list, opts, {}, new Set(["a"])).map((c) => c.key), ["b"]);
 });
 
+test("search failures are reported and don't lose earlier picks", async () => {
+  const levers = { ...DEFAULT_LEVERS, adventurousness: 1, maxListeners: 0, tracksPerArtist: 1 };
+  const broken: FindSong = async () => {
+    throw new Error("403");
+  };
+  const manyTracks = { ...graph, topTracks: async () => ["1", "2", "3", "4"] };
+  const twoArtists = { ...manyTracks, similar: async (a: string) => (a === "Known" ? [{ name: "Niche", match: 1 }, { name: "Huge", match: 0.5 }, { name: "Far", match: 0.4 }] : []) };
+  await assert.rejects(discover(twoArtists, broken, taste(), levers), /keeps failing: 403/);
+
+  let calls = 0;
+  const failsAfterFirst: FindSong = async (artist, title) => {
+    if (++calls === 1) return find(artist, title);
+    throw new Error("429");
+  };
+  const seen: string[] = [];
+  const picks = await discover(twoArtists, failsAfterFirst, taste(), levers, undefined, (p) => seen.push(p.artist));
+  assert.equal(picks.length, 1);
+  assert.deepEqual(seen, [picks[0].artist]);
+});
+
 test("remasters and live versions count as the same song", () => {
   assert.equal(songKey("The Band", "Song (2011 Remaster)"), songKey("Band", "Song"));
   assert.equal(songKey("Band", "Song - Live"), songKey("band", "SONG"));

@@ -49,20 +49,26 @@ export async function readLibraryAndRecent(): Promise<AppleHistory> {
   return { songs, artists: [...new Set(songs.map((s) => s.artist))] };
 }
 
+export const searchStats = { searches: 0, withResults: 0 };
+
 export async function findSong(artist: string, title: string): Promise<CatalogSong | null> {
-  const res = await request(`/v1/catalog/${await getStorefront()}/search`, {
-    term: `${artist} ${title}`,
-    types: "songs",
-    limit: 10,
-  });
+  // Params go in the URL so they don't depend on how Cider's helper reads its arguments.
+  const query = new URLSearchParams({ term: `${artist} ${title}`, types: "songs", limit: "10" });
+  const res = await request(`/v1/catalog/${await getStorefront()}/search?${query}`);
+  const results = res?.data?.results?.songs?.data ?? res?.results?.songs?.data ?? [];
+  searchStats.searches++;
+  if (results.length) searchStats.withResults++;
   const wantArtist = normalizeArtist(artist);
   const wantTitle = normalizeTitle(title);
-  // Exact artist matching leaves some songs unfound, but prevents same-name mix-ups.
-  const hit = (res?.data?.results?.songs?.data ?? []).find(
-    (s: any) =>
-      normalizeArtist(s.attributes.artistName) === wantArtist &&
-      normalizeTitle(s.attributes.name) === wantTitle,
-  );
+  // Artist credits may add guests, but must include the artist to prevent same-name mix-ups.
+  const hit = results.find((s: any) => {
+    const gotArtist = normalizeArtist(s.attributes.artistName);
+    const gotTitle = normalizeTitle(s.attributes.name);
+    return (
+      (gotArtist === wantArtist || gotArtist.startsWith(`${wantArtist} `)) &&
+      (gotTitle === wantTitle || gotTitle.startsWith(`${wantTitle} `))
+    );
+  });
   if (!hit) return null;
   const a = hit.attributes;
   return {
