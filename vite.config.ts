@@ -1,6 +1,5 @@
 import { defineConfig } from "vite";
 import vue from "@vitejs/plugin-vue";
-import AutoImport from "unplugin-auto-import/vite";
 import cssInjectedByJsPlugin from "vite-plugin-css-injected-by-js";
 import tsconfigPaths from "vite-tsconfig-paths";
 import { stringify } from "yaml";
@@ -10,10 +9,6 @@ export default defineConfig({
   plugins: [
     tsconfigPaths(),
     cssInjectedByJsPlugin(),
-    AutoImport({
-      imports: ["vue"],
-      include: [/\.vue$/, /\.vue\?vue/],
-    }),
     vue({
       template: {
         compilerOptions: {
@@ -34,7 +29,6 @@ export default defineConfig({
   ],
   build: {
     outDir: "dist/",
-    minify: "esbuild",
     lib: {
       entry: "src/main.ts",
       fileName: "plugin",
