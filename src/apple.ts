@@ -4,7 +4,9 @@ import type { CatalogSong } from "./engine/discover.ts";
 import { lastFmCache } from "./store.ts";
 
 const POLL_MS = 2000;
-const DEFAULT_STOREFRONT = "us";
+// Matches the storefront PluginKit's playItemById always uses.
+const STOREFRONT = "us";
+const LIBRARY_PAGE_GAP_MS = 1000;
 
 const REQUEST_TIMEOUT_MS = 10_000;
 
@@ -20,16 +22,10 @@ function request(path: string, params: any = {}, opts?: any): Promise<any> {
   return Promise.race([v3<any>(path, params, opts), timeout]).finally(() => clearTimeout(timer));
 }
 
-let storefront: Promise<string> | null = null;
-function getStorefront(): Promise<string> {
-  return (storefront ??= request("/v1/me/storefront")
-    .then((r) => r?.data?.data?.[0]?.id ?? DEFAULT_STOREFRONT)
-    .catch(() => DEFAULT_STOREFRONT));
-}
-
 async function pagedLibrary(path: string, maxPages: number): Promise<any[]> {
   const out: any[] = [];
   for (let page = 0; page < maxPages; page++) {
+    if (page) await new Promise((r) => setTimeout(r, LIBRARY_PAGE_GAP_MS));
     const res = await request(path, { limit: 100, offset: page * 100 });
     const data = res?.data?.data ?? [];
     out.push(...data);
@@ -63,7 +59,7 @@ export async function readLibraryAndRecent(): Promise<AppleHistory> {
 
 export const searchStats = { searches: 0, withResults: 0 };
 
-const SEARCH_GAP_MS = 1500;
+const SEARCH_GAP_MS = 3500;
 const BACKOFF_START_MS = 20_000;
 const BACKOFF_MAX_MS = 120_000;
 const SEARCH_CACHE_DAYS = 30;
@@ -99,33 +95,39 @@ export async function findSong(artist: string, title: string): Promise<CatalogSo
 }
 
 async function searchCatalog(artist: string, title: string): Promise<CatalogSong | null> {
-  // Params go in the URL so they don't depend on how Cider's helper reads its arguments.
-  const query = new URLSearchParams({ term: `${artist} ${title}`, types: "songs", limit: "10" });
-  const res = await request(`/v1/catalog/${await getStorefront()}/search?${query}`);
-  const results = res?.data?.results?.songs?.data ?? res?.results?.songs?.data ?? [];
+  // The public iTunes service has its own limit, separate from the one Cider's API helper hits.
+  const query = new URLSearchParams({
+    term: `${artist} ${title}`,
+    entity: "song",
+    limit: "10",
+    country: STOREFRONT,
+  });
+  const res = await fetch(`https://itunes.apple.com/search?${query}`, {
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  if (!res.ok) throw new Error(`Apple search returned HTTP ${res.status}`);
+  const results = ((await res.json()).results ?? []).filter((s: any) => s.isStreamable !== false);
   searchStats.searches++;
   if (results.length) searchStats.withResults++;
   const wantArtist = normalizeArtist(artist);
   const wantTitle = normalizeTitle(title);
   // Artist credits may add guests, but must include the artist to prevent same-name mix-ups.
   const hit = results.find((s: any) => {
-    const gotArtist = normalizeArtist(s.attributes.artistName);
-    const gotTitle = normalizeTitle(s.attributes.name);
+    const gotArtist = normalizeArtist(s.artistName);
+    const gotTitle = normalizeTitle(s.trackName);
     return (
       (gotArtist === wantArtist || gotArtist.startsWith(`${wantArtist} `)) &&
       (gotTitle === wantTitle || gotTitle.startsWith(`${wantTitle} `))
     );
   });
   if (!hit) return null;
-  const a = hit.attributes;
   return {
-    id: hit.id,
-    title: a.name,
-    artist: a.artistName,
-    album: a.albumName,
-    year: Number(String(a.releaseDate ?? "").slice(0, 4)) || 0,
-    artworkUrl: (a.artwork?.url ?? "").replace("{w}", "120").replace("{h}", "120"),
-    isrc: a.isrc,
+    id: String(hit.trackId),
+    title: hit.trackName,
+    artist: hit.artistName,
+    album: hit.collectionName,
+    year: Number(String(hit.releaseDate ?? "").slice(0, 4)) || 0,
+    artworkUrl: hit.artworkUrl100 ?? "",
   };
 }
 
