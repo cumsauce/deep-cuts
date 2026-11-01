@@ -15,16 +15,18 @@ curl -L -o /tmp/deep-cuts.zip https://github.com/cumsauce/deep-cuts/releases/dow
 ```
 
 ```bash
-mkdir -p ~/Library/"Application Support"/sh.cider.electron/plugins
+mkdir -p ~/Library/"Application Support"/sh.cider.genten/plugins
 ```
 
 ```bash
-unzip -o /tmp/deep-cuts.zip -d ~/Library/"Application Support"/sh.cider.electron/plugins
+unzip -o /tmp/deep-cuts.zip -d ~/Library/"Application Support"/sh.cider.genten/plugins
 ```
 
 Then restart Cider and open **Deep Cuts** from the main menu. Run the same commands to update.
 
-**Other systems:** unzip the same file into `%APPDATA%\C2Windows\plugins` on Windows or `~/.config/sh.cider.electron/plugins` on Linux.
+This is the Cider 4 path. Older Cider versions on macOS use `sh.cider.electron` instead of `sh.cider.genten`.
+
+**Other systems:** paths for Cider 4 are unconfirmed. Older versions use `%APPDATA%\C2Windows\plugins` on Windows and `~/.config/sh.cider.electron/plugins` on Linux.
 
 ## First run
 
